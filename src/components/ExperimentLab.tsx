@@ -1,0 +1,51 @@
+import { useMemo, useState } from 'react'
+import { Beaker, Check, Info, ShieldCheck } from 'lucide-react'
+import type { ExperimentRun, Graph, PageRankResult } from '../types'
+import { cloneGraph, graphStats } from '../data/networks'
+import { runPageRank } from '../engine/pagerank'
+import { Badge, Button, Metric, Panel, PanelHeading } from './ui'
+
+function ResultTable({ runs, pages }: { runs: ExperimentRun[]; pages: Array<{ id: string; name: string }> }) {
+  return <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>Page</th>{runs.map((run) => <th key={run.label}>{run.label}</th>)}</tr></thead><tbody>{pages.map((page) => <tr key={page.id}><th>{page.name}</th>{runs.map((run) => { const index = run.result.pageOrder.findIndex((item) => item.id === page.id); return <td key={run.label}>{index >= 0 ? (run.result.scores[index] ?? 0).toFixed(4) : '—'}</td> })}</tr>)}</tbody></table></div>
+}
+
+export function ExperimentLab({ graph, baselineGraph, currentResult, damping, tolerance, onReset }: { graph: Graph; baselineGraph: Graph; currentResult: PageRankResult; damping: number; tolerance: number; onReset: () => void }) {
+  const [active, setActive] = useState<'network' | 'damping' | 'tolerance' | 'dangling' | 'verification'>('network')
+  const experiments = useMemo(() => {
+    const config = { damping, tolerance }
+    const original = runPageRank(baselineGraph, config)
+    const modified = runPageRank(graph, config)
+    const dampingRuns = [0.5, 0.7, 0.85, 0.95].map((value) => ({ label: `d = ${value}`, result: runPageRank(graph, { damping: value, tolerance }) }))
+    const toleranceRuns = [1e-3, 1e-6, 1e-8].map((value) => ({ label: `ε = ${value.toExponential(0)}`, result: runPageRank(graph, { damping, tolerance: value }) }))
+    const reference = runPageRank(graph, { damping, tolerance: 1e-12 })
+    const danglingGraph = cloneGraph(graph)
+    let danglingId = danglingGraph.nodes.find((node) => (graphStats(danglingGraph).outgoing.get(node.id) ?? 0) === 0)?.id
+    if (!danglingId) {
+      danglingId = 'dangling-lab'
+      danglingGraph.nodes.push({ id: danglingId, name: 'Dangling', x: 360, y: 450 })
+    }
+    const firstTarget = danglingGraph.nodes.find((node) => node.id !== danglingId)?.id
+    const linkedGraph = cloneGraph(danglingGraph)
+    if (firstTarget && !linkedGraph.links.some((link) => link.source === danglingId && link.target === firstTarget)) linkedGraph.links.push({ source: danglingId, target: firstTarget })
+    return { original, modified, dampingRuns, toleranceRuns, reference, dangling: runPageRank(danglingGraph, config), withLink: runPageRank(linkedGraph, config), danglingId }
+  }, [baselineGraph, graph, damping, tolerance])
+  const networkPages = useMemo(() => {
+    const pages = new Map<string, { id: string; name: string }>()
+    baselineGraph.nodes.forEach((page) => pages.set(page.id, page))
+    graph.nodes.forEach((page) => pages.set(page.id, page))
+    return [...pages.values()]
+  }, [baselineGraph, graph])
+  const tabs = [
+    { id: 'network' as const, label: 'Network effect', detail: 'link changes' },
+    { id: 'damping' as const, label: 'Damping sweep', detail: 'four d values' },
+    { id: 'tolerance' as const, label: 'Tolerance sweep', detail: 'precision tradeoff' },
+    { id: 'dangling' as const, label: 'Dangling pages', detail: 'column correction' },
+    { id: 'verification' as const, label: 'Verification', detail: 'pass / fail checks' },
+  ]
+  const runSummary = (result: PageRankResult) => <span className="run-summary"><b>{result.iterations}</b> iters <i>·</i> {result.converged ? 'converged' : 'limit reached'} <i>·</i> Δ {result.finalDifference.toExponential(1)}</span>
+  const visibleDelta = Math.max(...graph.nodes.map((page) => { const newIndex = experiments.modified.pageOrder.findIndex((item) => item.id === page.id); const oldIndex = experiments.original.pageOrder.findIndex((item) => item.id === page.id); return Math.abs((experiments.modified.scores[newIndex] ?? 0) - (experiments.original.scores[oldIndex] ?? 0)) }), 0)
+  const danglingIndex = experiments.dangling.pageOrder.findIndex((page) => page.id === experiments.danglingId)
+  const correctedColumn = experiments.dangling.transition.map((row) => row[danglingIndex] ?? 0)
+  const pageForDangling = experiments.dangling.pageOrder
+  return <Panel id="experiments" className="experiment-panel"><PanelHeading eyebrow="05 / EXPERIMENT LAB" title="Change one thing. Explain the ripple." detail="Each tab launches fresh calculations against the current graph. Your working network stays intact while comparisons accumulate here." icon={Beaker} action={<Button size="sm" variant="ghost" onClick={onReset}>Reset experiment view</Button>} /><div className="experiment-tabs">{tabs.map((tab) => <button key={tab.id} className={active === tab.id ? 'active' : ''} onClick={() => setActive(tab.id)}><strong>{tab.label}</strong><span>{tab.detail}</span></button>)}</div>{active === 'network' && <div className="experiment-body"><div className="experiment-intro"><Badge tone="violet">EXPERIMENT 01</Badge><h3>Network effect</h3><p>Compare the last committed configuration with the current graph. A single edge redistributes probability, which can travel through later iterations to affect pages that were not directly connected.</p></div><div className="experiment-metrics"><Metric label="Original run" value={experiments.original.iterations} detail={experiments.original.converged ? 'converged' : 'limit reached'} /><Metric label="Modified run" value={experiments.modified.iterations} detail={experiments.modified.converged ? 'converged' : 'limit reached'} tone="violet" /><Metric label="Visible delta" value={visibleDelta.toFixed(4)} detail="largest score change" tone="amber" /></div><ResultTable runs={[{ label: 'Original', result: experiments.original }, { label: 'Modified', result: experiments.modified }]} pages={networkPages} /><div className="run-summary-row">{runSummary(experiments.original)} <span>→</span> {runSummary(experiments.modified)}</div></div>}{active === 'damping' && <div className="experiment-body"><div className="experiment-intro"><Badge tone="violet">EXPERIMENT 02</Badge><h3>How much should the walk trust the web?</h3><p>Hold the graph and tolerance constant while varying d. Higher damping is not a universal “more score” switch; inspect the pattern this network produces.</p></div><ResultTable runs={experiments.dampingRuns} pages={graph.nodes} /><div className="sweep-bars">{experiments.dampingRuns.map((run) => <div key={run.label}><div className="sweep-head"><span>{run.label}</span>{runSummary(run.result)}</div><div className="sweep-track">{run.result.scores.map((score, index) => <i key={index} title={`${run.result.pageOrder[index]?.name}: ${score.toFixed(4)}`} style={{ height: `${Math.max(8, score * 100 * Math.max(graph.nodes.length, 1))}%` }} />)}</div></div>)}</div></div>}{active === 'tolerance' && <div className="experiment-body"><div className="experiment-intro"><Badge tone="violet">EXPERIMENT 03</Badge><h3>Precision has a cost</h3><p>The `1e-12` reference is another actual iterative run. The three configured tolerances are compared to it rather than to hardcoded expected digits.</p></div><ResultTable runs={[...experiments.toleranceRuns, { label: 'Reference 1e-12', result: experiments.reference }]} pages={graph.nodes} /><div className="tolerance-cards">{experiments.toleranceRuns.map((run) => <div key={run.label}><span>{run.label}</span><strong>{run.result.iterations} iterations</strong><small>max score error vs reference: {Math.max(...run.result.scores.map((score, index) => Math.abs(score - (experiments.reference.scores[index] ?? 0))), 0).toExponential(2)}</small><Badge tone={run.result.converged ? 'mint' : 'amber'}>{run.result.converged ? 'criterion met' : 'not met'}</Badge></div>)}</div></div>}{active === 'dangling' && <div className="experiment-body"><div className="experiment-intro"><Badge tone="amber">EXPERIMENT 04</Badge><h3>What happens when a page has nowhere to go?</h3><p>The dangling-page run creates or reuses a page with zero outgoing links, displays the raw zero column, then shows the uniform transition column used for the calculation and compares it with one outgoing link.</p></div><div className="dangling-compare"><div className="dangling-card"><Badge tone="amber">Before correction</Badge><strong>{experiments.dangling.pageOrder.find((page) => page.id === experiments.danglingId)?.name ?? 'Dangling'}</strong><span>out-degree = 0 · raw adjacency column</span><code>[{pageForDangling.map(() => '0.000').join(', ')}]</code></div><div className="dangling-arrow">→</div><div className="dangling-card"><Badge tone="mint">Corrected column</Badge><strong>uniform 1 / N</strong><span>used by transition matrix P</span><code>[{correctedColumn.map((value) => value.toFixed(3)).join(', ')}]</code></div></div><ResultTable runs={[{ label: 'Corrected', result: experiments.dangling }, { label: 'With outgoing link', result: experiments.withLink }]} pages={pageForDangling} /></div>}{active === 'verification' && <div className="experiment-body"><div className="experiment-intro"><Badge tone="mint">EXPERIMENT 05</Badge><h3>Does the result satisfy the model?</h3><p>These checks are computed from the latest run. A raw transition residual can remain non-zero under damping; the full damped residual is the correct stationary test.</p></div><div className="verification-grid">{currentResult.diagnostics.checks.map((check) => <div key={check.label} className={`verification-card ${check.pass ? 'pass' : 'fail'}`}><div className="verification-card-top"><span>{check.pass ? <Check size={15} /> : <Info size={15} />}</span><Badge tone={check.pass ? 'mint' : 'red'}>{check.pass ? 'PASS' : 'REVIEW'}</Badge></div><strong>{check.label}</strong><b>{check.value}</b><small>{check.detail}</small></div>)}</div><div className="verification-footer"><ShieldCheck size={17} /><span>Iteration limit: {currentResult.maxIterations} · final convergence status: <b>{currentResult.converged ? 'criterion satisfied' : 'not satisfied'}</b></span></div></div>}</Panel>
+}
