@@ -4,7 +4,9 @@ import type { Graph, PageRankResult } from '../types'
 import { graphStats } from '../data/networks'
 import { Badge, Button, Panel, PanelHeading } from './ui'
 
-const NODE_RADIUS = 29
+const BASE_RADIUS = 27
+const MIN_RADIUS = 21
+const MAX_RADIUS = 37
 
 function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
@@ -34,6 +36,14 @@ export function NetworkStudio({ graph, result, selectedId, dirty, onSelect, onGr
   const stats = useMemo(() => graphStats(graph), [graph])
   const scoreById = useMemo(() => new Map(result.pageOrder.map((page, index) => [page.id, result.scores[index] ?? 0])), [result])
   const topId = result.pageOrder[result.scores.indexOf(Math.max(...result.scores, 0))]?.id
+  const maxScore = Math.max(...result.scores, 0)
+  // Node area grows with PageRank so the picture itself reads as a ranking.
+  const radiusFor = (id: string) => {
+    const score = scoreById.get(id)
+    if (score === undefined || maxScore <= 0) return BASE_RADIUS
+    return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * Math.sqrt(score / maxScore)
+  }
+  const linkKeys = useMemo(() => new Set(graph.links.map((link) => `${link.source}>${link.target}`)), [graph.links])
   const selected = graph.nodes.find((node) => node.id === selectedId)
   const incoming = selected ? graph.links.filter((link) => link.target === selected.id).map((link) => graph.nodes.find((node) => node.id === link.source)?.name).filter(Boolean) : []
   const outgoing = selected ? graph.links.filter((link) => link.source === selected.id).map((link) => graph.nodes.find((node) => node.id === link.target)?.name).filter(Boolean) : []
@@ -83,7 +93,7 @@ export function NetworkStudio({ graph, result, selectedId, dirty, onSelect, onGr
       <div className="studio-layout">
         <div className="network-canvas-wrap">
           <div className="canvas-toolbar">
-            <div className="canvas-hint"><span className="signal-dot" /> Drag nodes · click to inspect · arrows show outgoing links</div>
+            <div className="canvas-hint"><span className="signal-dot" /> Drag nodes · click to inspect · node size follows score</div>
             <div className="canvas-stats"><span>{graph.nodes.length} pages</span><span>{graph.links.length} links</span></div>
           </div>
           <svg className="network-canvas" viewBox="0 0 700 510" role="img" aria-label="Editable directed page network" onPointerMove={(event) => {
@@ -102,21 +112,28 @@ export function NetworkStudio({ graph, result, selectedId, dirty, onSelect, onGr
               if (!from || !to) return null
               const active = link.source === selectedId || link.target === selectedId
               const dx = to.x - from.x; const dy = to.y - from.y; const distance = Math.sqrt(dx * dx + dy * dy) || 1
-              const sx = from.x + (dx / distance) * NODE_RADIUS; const sy = from.y + (dy / distance) * NODE_RADIUS
-              const tx = to.x - (dx / distance) * NODE_RADIUS; const ty = to.y - (dy / distance) * NODE_RADIUS
-              return <line key={`${link.source}-${link.target}`} x1={sx} y1={sy} x2={tx} y2={ty} className={`network-link ${active ? 'active' : ''}`} markerEnd={`url(#${active ? 'arrow-active' : 'arrow'})`} />
+              const ux = dx / distance; const uy = dy / distance
+              // Reciprocal links bow apart so both directions stay visible instead of overlapping.
+              const bend = linkKeys.has(`${link.target}>${link.source}`) ? 16 : 0
+              const nx = -uy; const ny = ux
+              const fromR = radiusFor(from.id) + 2; const toR = radiusFor(to.id) + 4
+              const sx = from.x + ux * fromR + nx * bend * 0.45; const sy = from.y + uy * fromR + ny * bend * 0.45
+              const tx = to.x - ux * toR + nx * bend * 0.45; const ty = to.y - uy * toR + ny * bend * 0.45
+              const cx = (sx + tx) / 2 + nx * bend; const cy = (sy + ty) / 2 + ny * bend
+              return <path key={`${link.source}-${link.target}`} d={`M${sx},${sy} Q${cx},${cy} ${tx},${ty}`} className={`network-link ${active ? 'active' : ''}`} markerEnd={`url(#${active ? 'arrow-active' : 'arrow'})`} />
             })}
             {graph.nodes.map((node) => {
               const isSelected = node.id === selectedId
               const dangling = (stats.outgoing.get(node.id) ?? 0) === 0
               const isTop = node.id === topId
-              const score = scoreById.get(node.id) ?? 0
-              return <g key={node.id} className={`network-node ${isSelected ? 'selected' : ''} ${isTop ? 'top' : ''} ${dangling ? 'dangling' : ''}`} transform={`translate(${node.x} ${node.y})`} onPointerDown={(event) => { event.stopPropagation(); setDragId(node.id); onSelect(node.id) }}>
-                <circle r={NODE_RADIUS + (isSelected ? 5 : 0)} className="node-halo" />
-                <circle r={NODE_RADIUS} className="node-circle" />
-                <text className="node-initial" textAnchor="middle" y="5">{node.name.slice(0, 1).toUpperCase()}</text>
-                <text className="node-name" textAnchor="middle" y="52">{node.name}</text>
-                <text className="node-score" textAnchor="middle" y="67">{score.toFixed(3)}</text>
+              const score = scoreById.get(node.id)
+              const radius = radiusFor(node.id)
+              return <g key={node.id} className={`network-node ${isSelected ? 'selected' : ''} ${isTop ? 'top' : ''} ${dangling ? 'dangling' : ''}`} transform={`translate(${node.x} ${node.y})`} tabIndex={0} role="button" aria-pressed={isSelected} aria-label={`${node.name}${score === undefined ? ', not yet calculated' : `, PageRank ${score.toFixed(3)}`}${dangling ? ', dangling page' : ''}`} onPointerDown={(event) => { event.stopPropagation(); setDragId(node.id); onSelect(node.id) }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(node.id) } }}>
+                <circle r={radius + (isSelected ? 5 : 0)} className="node-halo" />
+                <circle r={radius} className="node-circle" />
+                <text className="node-initial" textAnchor="middle" y="6">{node.name.slice(0, 1).toUpperCase()}</text>
+                <text className="node-name" textAnchor="middle" y={radius + 19}>{node.name}</text>
+                <text className="node-score" textAnchor="middle" y={radius + 34}>{score === undefined ? 'not run' : score.toFixed(3)}</text>
               </g>
             })}
           </svg>
@@ -139,11 +156,11 @@ export function NetworkStudio({ graph, result, selectedId, dirty, onSelect, onGr
           </div>
           <div className="control-block">
             <div className="control-label">Add a page</div>
-            <div className="inline-input"><input value={newPageName} onChange={(event) => setNewPageName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addPage()} placeholder="e.g. Glossary" /><Button size="sm" variant="secondary" icon={Plus} onClick={addPage}>Add</Button></div>
+            <div className="inline-input"><input value={newPageName} onChange={(event) => setNewPageName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && addPage()} aria-label="New page name" placeholder="e.g. Glossary" /><Button size="sm" variant="secondary" icon={Plus} onClick={addPage}>Add</Button></div>
           </div>
           <div className="control-block">
             <div className="control-label">Add a directed link</div>
-            <div className="link-inputs"><select value={source} onChange={(event) => setSource(event.target.value)}><option value="">From page…</option>{graph.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><span>→</span><select value={target} onChange={(event) => setTarget(event.target.value)}><option value="">To page…</option>{graph.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></div>
+            <div className="link-inputs"><select aria-label="Link source page" value={source} onChange={(event) => setSource(event.target.value)}><option value="">From page…</option>{graph.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select><span>→</span><select aria-label="Link target page" value={target} onChange={(event) => setTarget(event.target.value)}><option value="">To page…</option>{graph.nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}</select></div>
             <Button size="sm" variant="secondary" icon={Link2} onClick={addLink} disabled={!source || !target || source === target}>Create link</Button>
           </div>
         </aside>
@@ -151,14 +168,14 @@ export function NetworkStudio({ graph, result, selectedId, dirty, onSelect, onGr
       <div className="studio-bottom">
         <div className="selected-inspector">
           <div className="inspector-kicker">Selected page</div>
-          {selected ? <><div className="selected-name"><span className="selected-avatar">{selected.name.slice(0, 1)}</span><div><strong>{selected.name}</strong><span>{rankLabel ?? (stats.outgoing.get(selected.id) === 0 ? 'No outgoing links' : 'Active page')}</span></div></div><div className="inspector-stats"><span><b>{(scoreById.get(selected.id) ?? 0).toFixed(5)}</b><small>PageRank</small></span><span><b>{incoming.length}</b><small>Incoming</small></span><span><b>{outgoing.length}</b><small>Outgoing</small></span></div><div className="link-summary"><span>In: {incoming.length ? incoming.join(', ') : 'none'}</span><span>Out: {outgoing.length ? outgoing.join(', ') : 'none'}</span></div></> : <div className="muted-copy">Select a node to inspect its local neighbourhood.</div>}
+          {selected ? <><div className="selected-name"><span className="selected-avatar">{selected.name.slice(0, 1)}</span><div><strong>{selected.name}</strong><span>{rankLabel ?? (stats.outgoing.get(selected.id) === 0 ? 'No outgoing links' : 'Active page')}</span></div></div><div className="inspector-stats"><span><b>{scoreById.has(selected.id) ? (scoreById.get(selected.id) ?? 0).toFixed(5) : '—'}</b><small>PageRank</small></span><span><b>{incoming.length}</b><small>Incoming</small></span><span><b>{outgoing.length}</b><small>Outgoing</small></span></div><div className="link-summary"><span>In: {incoming.length ? incoming.join(', ') : 'none'}</span><span>Out: {outgoing.length ? outgoing.join(', ') : 'none'}</span></div></> : <div className="muted-copy">Select a node to inspect its local neighbourhood.</div>}
         </div>
         <div className="edit-inspector">
           <div className="inspector-kicker">Edit selected page</div>
-          <div className="inline-input"><input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} placeholder={selected ? `Rename ${selected.name}` : 'Select a page first'} disabled={!selected} /><Button size="sm" variant="secondary" onClick={renamePage} disabled={!selected || !renameValue.trim()}>Rename</Button></div>
+          <div className="inline-input"><input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && renamePage()} aria-label="New name for selected page" placeholder={selected ? `Rename ${selected.name}` : 'Select a page first'} disabled={!selected} /><Button size="sm" variant="secondary" onClick={renamePage} disabled={!selected || !renameValue.trim()}>Rename</Button></div>
           {selected && <Button size="sm" variant="danger" icon={Trash2} onClick={deletePage}>Delete page</Button>}
         </div>
-        <div className="link-inspector"><div className="inspector-kicker">Links · click to remove</div><div className="link-chip-list">{graph.links.length ? graph.links.map((link) => <button key={`${link.source}-${link.target}`} className="link-chip" onClick={() => removeLink(link.source, link.target)}>{graph.nodes.find((node) => node.id === link.source)?.name} <span>→</span> {graph.nodes.find((node) => node.id === link.target)?.name} <Trash2 size={12} /></button>) : <span className="muted-copy">No links yet.</span>}</div></div>
+        <div className="link-inspector"><div className="inspector-kicker">Links · click to remove</div><div className="link-chip-list">{graph.links.length ? graph.links.map((link) => <button key={`${link.source}-${link.target}`} className="link-chip" title="Remove this link" onClick={() => removeLink(link.source, link.target)}>{graph.nodes.find((node) => node.id === link.source)?.name} <span>→</span> {graph.nodes.find((node) => node.id === link.target)?.name} <Trash2 size={12} /></button>) : <span className="muted-copy">No links yet.</span>}</div></div>
       </div>
     </Panel>
   )

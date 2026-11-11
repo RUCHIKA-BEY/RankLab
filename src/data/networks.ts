@@ -5,9 +5,9 @@ const link = (source: string, target: string): Link => ({ source, target })
 
 export const DEFAULT_GRAPH: Graph = {
   nodes: [
-    node('home', 'Home', 130, 160),
-    node('research', 'Research', 350, 88),
-    node('tutorials', 'Tutorials', 565, 150),
+    node('home', 'Home', 130, 190),
+    node('research', 'Research', 350, 72),
+    node('tutorials', 'Tutorials', 565, 180),
     node('projects', 'Projects', 565, 325),
     node('resources', 'Resources', 330, 390),
     node('contact', 'Contact', 115, 370),
