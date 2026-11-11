@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Activity, Beaker, BookOpen, Check, ChevronRight, CircleHelp, Gauge, GitBranch, Info, Layers3, Menu, Play, RotateCcw, Sparkles, Target, Workflow, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Activity, Beaker, BookOpen, Check, ChevronRight, CircleHelp, Gauge, GitBranch, Info, Layers3, Play, RotateCcw, Sparkles, Target, Workflow, X } from 'lucide-react'
 import { cloneGraph, DEFAULT_GRAPH, PRESETS } from './data/networks'
 import { runPageRank } from './engine/pagerank'
 import type { Graph, PageRankResult } from './types'
@@ -16,6 +16,9 @@ const DEFAULT_TOLERANCE = 1e-6
 const initialGraph = cloneGraph(DEFAULT_GRAPH)
 const initialResult = runPageRank(initialGraph, { damping: DEFAULT_DAMPING, tolerance: DEFAULT_TOLERANCE })
 
+// Only names and links affect the calculation; dragging a node must not invalidate results.
+const structureKey = (graph: Graph) => JSON.stringify([graph.nodes.map((node) => [node.id, node.name]), graph.links.map((link) => [link.source, link.target])])
+
 const navItems = [
   { id: 'overview', label: 'Overview', icon: Layers3 },
   { id: 'studio', label: 'Network Studio', icon: GitBranch },
@@ -28,6 +31,7 @@ const navItems = [
 function App() {
   const [graph, setGraph] = useState<Graph>(initialGraph)
   const [baselineGraph, setBaselineGraph] = useState<Graph>(cloneGraph(initialGraph))
+  const [committedGraph, setCommittedGraph] = useState<Graph>(cloneGraph(initialGraph))
   const [result, setResult] = useState<PageRankResult>(initialResult)
   const [baselineResult, setBaselineResult] = useState<PageRankResult>(initialResult)
   const [damping, setDamping] = useState(DEFAULT_DAMPING)
@@ -46,6 +50,17 @@ function App() {
   const sectionCount = graph.nodes.length
   const presetSummary = useMemo(() => PRESETS.map(({ id, name, description }) => ({ id, name, description })), [])
 
+  useEffect(() => {
+    // Keep the navigation highlight in sync with the section currently being read.
+    const sections = navItems.map(({ id }) => document.getElementById(id)).filter((el): el is HTMLElement => el !== null)
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
+      if (visible) setActiveNav(visible.target.id)
+    }, { rootMargin: '-15% 0px -70% 0px' })
+    sections.forEach((section) => observer.observe(section))
+    return () => observer.disconnect()
+  }, [])
+
   function scrollTo(id: string) {
     setActiveNav(id)
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -53,7 +68,7 @@ function App() {
 
   function markGraphChanged(next: Graph) {
     setGraph(next)
-    setDirty(true)
+    if (structureKey(next) !== structureKey(graph)) setDirty(true)
     setError(null)
     if (selectedId && !next.nodes.some((node) => node.id === selectedId)) setSelectedId(next.nodes[0]?.id ?? null)
   }
@@ -61,11 +76,15 @@ function App() {
   function handleRun() {
     try {
       const next = runPageRank(graph, { damping, tolerance })
-      setBaselineGraph(cloneGraph(graph))
-      setBaselineResult(result)
+      if (dirty) {
+        // The previous committed run becomes the "before" side of every comparison.
+        setBaselineGraph(committedGraph)
+        setBaselineResult(result)
+        setCommittedGraph(cloneGraph(graph))
+        setComparisonAvailable(true)
+      }
       setResult(next)
       setDirty(false)
-      setComparisonAvailable(true)
       setStepIndex(next.history.length - 1)
       setError(null)
     } catch (runError) {
@@ -79,15 +98,21 @@ function App() {
     const next = cloneGraph(preset.graph)
     setGraph(next)
     setSelectedId(next.nodes[0]?.id ?? null)
-    setStepIndex(0)
-    setDirty(true)
-    setError(null)
+    try {
+      // A preset is a fresh starting point: calculate it immediately so every panel describes the visible graph.
+      const nextResult = runPageRank(next, { damping, tolerance })
+      setBaselineGraph(cloneGraph(next)); setCommittedGraph(cloneGraph(next)); setResult(nextResult); setBaselineResult(nextResult)
+      setComparisonAvailable(false); setStepIndex(nextResult.history.length - 1); setDirty(false); setError(null)
+    } catch (runError) {
+      setDirty(true)
+      setError(runError instanceof Error ? runError.message : 'Unable to run PageRank.')
+    }
   }
 
   function handleReset() {
     const nextGraph = cloneGraph(DEFAULT_GRAPH)
     const nextResult = runPageRank(nextGraph, { damping: DEFAULT_DAMPING, tolerance: DEFAULT_TOLERANCE })
-    setGraph(nextGraph); setBaselineGraph(cloneGraph(nextGraph)); setResult(nextResult); setBaselineResult(nextResult)
+    setGraph(nextGraph); setBaselineGraph(cloneGraph(nextGraph)); setCommittedGraph(cloneGraph(nextGraph)); setResult(nextResult); setBaselineResult(nextResult)
     setDamping(DEFAULT_DAMPING); setTolerance(DEFAULT_TOLERANCE); setSelectedId('research'); setDirty(false); setComparisonAvailable(false); setStepIndex(nextResult.history.length - 1); setError(null)
   }
 
@@ -107,11 +132,11 @@ function App() {
       <button className="brand-mark" onClick={() => scrollTo('overview')} aria-label="Go to RankLab overview"><span><i /><i /><i /></span><strong>Rank<span>Lab</span></strong></button>
       <div className="rail-rule" />
       <div className="rail-label">WORKSPACE</div>
-      <nav className="rail-nav">{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={activeNav === id ? 'active' : ''} onClick={() => scrollTo(id)}><Icon size={17} strokeWidth={1.8} /><span>{label}</span>{activeNav === id && <i className="nav-active" />}</button>)}</nav>
+      <nav className="rail-nav" aria-label="Sections">{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={activeNav === id ? 'active' : ''} aria-current={activeNav === id ? 'true' : undefined} aria-label={label} title={label} onClick={() => scrollTo(id)}><Icon size={17} strokeWidth={1.8} /><span>{label}</span>{activeNav === id && <i className="nav-active" />}</button>)}</nav>
       <div className="rail-bottom"><button className="rail-help" onClick={() => setWalkthrough((value) => !value)}><CircleHelp size={17} /><span>Guided walkthrough</span></button><div className="rail-version"><span className="status-pulse" /> local calculation engine <small>v0.1 · no black boxes</small></div></div>
     </aside>
     <main className="main-shell">
-      <header className="topbar"><div className="topbar-title"><span className="mobile-brand"><i /><i /><i /></span><div><span>RANKLAB / PAGE RANK LABORATORY</span><strong>Explore how links become authority.</strong></div></div><div className="topbar-actions"><Badge tone={dirty ? 'amber' : 'mint'} dot>{dirty ? 'Unsaved calculation' : 'Model is current'}</Badge><button className="icon-button" onClick={() => setWalkthrough((value) => !value)} aria-label="Toggle walkthrough"><CircleHelp size={18} /></button><button className="mobile-menu" aria-label="Open menu"><Menu size={18} /></button></div></header>
+      <header className="topbar"><div className="topbar-title"><span className="mobile-brand"><i /><i /><i /></span><div><span>RANKLAB / PAGE RANK LABORATORY</span><strong>Explore how links become authority.</strong></div></div><div className="topbar-actions"><Badge tone={dirty ? 'amber' : 'mint'} dot>{dirty ? 'Results out of date' : 'Model is current'}</Badge><button className="icon-button" onClick={() => setWalkthrough((value) => !value)} aria-label="Toggle walkthrough"><CircleHelp size={18} /></button></div></header>
       <div className="page-content">
         {error && <div className="error-banner"><Info size={17} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={15} /></button></div>}
         {walkthrough && <div className="walkthrough"><div className="walkthrough-mark"><Sparkles size={16} /></div><div><strong>A clean viva path</strong><p>Start at the network studio, run the model, click a page to connect the graph with its score, then open convergence and the math lab. Finish in Experiment Lab to show one controlled change at a time.</p></div><button onClick={() => setWalkthrough(false)} aria-label="Close walkthrough"><X size={15} /></button></div>}
